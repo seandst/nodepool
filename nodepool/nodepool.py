@@ -1374,7 +1374,7 @@ class NodePool(threading.Thread):
             n_building = count_nodes(label.name, nodedb.BUILDING)
             n_used = count_nodes(label.name, nodedb.USED)
             n_test = count_nodes(label.name, nodedb.TEST)
-            ready = n_ready + n_building + n_used + n_test
+            ready = n_ready + n_building + n_test
 
             capacity = 0
             for provider in label.providers.values():
