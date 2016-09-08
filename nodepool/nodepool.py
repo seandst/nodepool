@@ -52,6 +52,8 @@ CONNECT_TIMEOUT = 10 * MINS  # How long to try to connect after a server
                              # is ACTIVE
 NODE_CLEANUP = 8 * HOURS     # When to start deleting a node that is not
                              # READY or HOLD
+NODE_EXTRA = 10 * MINS       # When to start deleting nodes that exceed a label's
+                             # min-ready count.
 TEST_CLEANUP = 5 * MINS      # When to start deleting a node that is in TEST
 IMAGE_CLEANUP = 8 * HOURS    # When to start deleting an image that is not
                              # READY or is not the current or previous image
@@ -2106,6 +2108,16 @@ class NodePool(threading.Thread):
                 self.log.exception("Exception cleaning up image id %s:" %
                                    dib_image_id)
 
+        for label in self.config.labels.values():
+            try:
+                with self.getDB().getSession() as session:
+                    ready_nodes = session.getNodes(label_name=label.name, state=nodedb.READY)
+                    if ready_nodes:
+                        self.cleanupReadyNodes(label, ready_nodes)
+            except Exception:
+                self.log.exception("Exception cleaning up ready nodes with label %s:" %
+                                   label.name)
+
         try:
             self.cleanupLeakedInstances()
             pass
@@ -2183,6 +2195,35 @@ class NodePool(threading.Thread):
             except Exception:
                 self.log.exception("Exception deleting node id: "
                                    "%s" % node.id)
+
+    def cleanupReadyNodes(self, label, nodes):
+        # sanity checking: all nodes are READY and match this label.
+        for node in nodes:
+            if (node.label_name != label.name or
+                    node.state != nodedb.READY):
+                self.log.error('cleanupReadyNodes handed an insane node!')
+            return
+
+        if len(nodes) <= label.min_ready:
+            # no extra nodes
+            return
+
+        # n_nodes is greater than min-ready, so there is at least one extra node
+        # To guard against runaway deletes, only delete one extra node at a time,
+        # and only delete nodes READY longer than the NODE_EXTRA timeout.
+        for node in nodes:
+            now = time.time()
+            time_in_state = now - node.state_time
+            if time_in_state > NODE_EXTRA:
+                try:
+                    self.deleteNode(node.id)
+                    self.log.info('Deleted extra node %s with label "%s"' % (node.id, label.name))
+                    return
+                except Exception:
+                    self.log.exception("Exception deleting node id: "
+                                       "%s" % node.id)
+
+
 
     def cleanupOneImage(self, session, image):
         # Normally, reap images that have sat in their current state
