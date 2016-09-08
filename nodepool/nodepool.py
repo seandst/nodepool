@@ -18,6 +18,7 @@
 
 import apscheduler.schedulers.background
 import apscheduler.triggers.cron
+from collections import defaultdict
 import gear
 import json
 import logging
@@ -51,6 +52,8 @@ CONNECT_TIMEOUT = 10 * MINS  # How long to try to connect after a server
                              # is ACTIVE
 NODE_CLEANUP = 8 * HOURS     # When to start deleting a node that is not
                              # READY or HOLD
+NODE_EXTRA = 10 * MINS       # When to start deleting nodes that exceed a label's
+                             # min-ready count.
 TEST_CLEANUP = 5 * MINS      # When to start deleting a node that is in TEST
 IMAGE_CLEANUP = 8 * HOURS    # When to start deleting an image that is not
                              # READY or is not the current or previous image
@@ -1317,15 +1320,22 @@ class NodePool(threading.Thread):
                            self.config.jenkins_managers.keys()))
 
     def getNeededNodes(self, session, allocation_history):
-        self.log.debug("Beginning node launch calculation")
+        self.log.info("Checking label demand")
         # Get the current demand for nodes.
         if self.gearman_client:
             label_demand = self.gearman_client.getNeededWorkers()
         else:
-            label_demand = {}
+            # inspect the build queue to determine demand
+            label_demand = self.getLabelDemandFromQueues()
 
         for name, demand in label_demand.items():
-            self.log.debug("  Demand from gearman: %s: %s" % (name, demand))
+            msg = "  Label demand: %s: %s" % (name, demand)
+            # report demand at INFO if a label is in demand,
+            # undemanded labels go to DEBUG
+            if demand:
+                self.log.info(msg)
+            else:
+                self.log.debug(msg)
 
         online_targets = set()
         for target in self.config.targets.values():
@@ -1396,10 +1406,15 @@ class NodePool(threading.Thread):
                 demand = actual_demand
 
             label_demand[label.name] = demand
-            self.log.debug("  Deficit: %s: %s "
-                           "(start: %s min-ready: %s ready: %s capacity: %s)" %
-                           (label.name, demand,
-                            start_demand, label.min_ready, ready, capacity))
+            label_msg = ("  Label %s: %s "
+                "(start: %s min-ready: %s ready: %s used: %s capacity: %s)" %
+                (label.name, demand, start_demand, label.min_ready, ready, n_used, capacity))
+            # log at INFO if: label is in demand, instance being started, is ready, is used
+            # if no action needed, log to DEBUG
+            if any((demand, start_demand, ready, n_used)):
+                self.log.info(label_msg)
+            else:
+                self.log.debug(label_msg)
 
         # "Target-Label-Provider" -- the triplet of info that identifies
         # the source and location of each node.  The mapping is
@@ -1468,8 +1483,36 @@ class NodePool(threading.Thread):
 
         allocation_history.grantsDone()
 
-        self.log.debug("Finished node launch calculation")
+        self.log.debug("Finished checking label demand.")
         return nodes_to_launch
+
+    def getLabelDemandFromQueues(self):
+        label_demand = defaultdict(int)
+        for name, manager in self.config.jenkins_managers.items():
+            try:
+                queue_info = manager.getQueueInfo()
+            except Exception:
+                self.log.exception('Error getting queue information from jenkins "%s"' % name)
+                continue
+
+            for queued_task in queue_info:
+                try:
+                    task_name = queued_task['task']['name']
+                except KeyError:
+                    self.log.warning('Task had no name: %s' % str(queued_task))
+                    continue
+
+                try:
+                    task_label = manager.getQueuedTaskLabel(task_name)
+                except Exception:
+                    self.log.exception('Error getting label for task "%s"' % task_name)
+                    continue
+
+                if task_label in self.config.labels:
+                    label_demand[task_label] += 1
+                else:
+                    self.log.warning('Unknown label "%s" ignored' % task_label)
+        return label_demand
 
     def getNeededSubNodes(self, session):
         nodes_to_launch = []
@@ -2065,6 +2108,16 @@ class NodePool(threading.Thread):
                 self.log.exception("Exception cleaning up image id %s:" %
                                    dib_image_id)
 
+        for label in self.config.labels.values():
+            try:
+                with self.getDB().getSession() as session:
+                    ready_nodes = session.getNodes(label_name=label.name, state=nodedb.READY)
+                    if ready_nodes:
+                        self.cleanupReadyNodes(label, ready_nodes)
+            except Exception:
+                self.log.exception("Exception cleaning up ready nodes with label %s:" %
+                                   label.name)
+
         try:
             self.cleanupLeakedInstances()
             pass
@@ -2142,6 +2195,35 @@ class NodePool(threading.Thread):
             except Exception:
                 self.log.exception("Exception deleting node id: "
                                    "%s" % node.id)
+
+    def cleanupReadyNodes(self, label, nodes):
+        # sanity checking: all nodes are READY and match this label.
+        for node in nodes:
+            if (node.label_name != label.name or
+                    node.state != nodedb.READY):
+                self.log.error('cleanupReadyNodes handed an insane node!')
+            return
+
+        if len(nodes) <= label.min_ready:
+            # no extra nodes
+            return
+
+        # n_nodes is greater than min-ready, so there is at least one extra node
+        # To guard against runaway deletes, only delete one extra node at a time,
+        # and only delete nodes READY longer than the NODE_EXTRA timeout.
+        for node in nodes:
+            now = time.time()
+            time_in_state = now - node.state_time
+            if time_in_state > NODE_EXTRA:
+                try:
+                    self.deleteNode(node.id)
+                    self.log.info('Deleted extra node %s with label "%s"' % (node.id, label.name))
+                    return
+                except Exception:
+                    self.log.exception("Exception deleting node id: "
+                                       "%s" % node.id)
+
+
 
     def cleanupOneImage(self, session, image):
         # Normally, reap images that have sat in their current state

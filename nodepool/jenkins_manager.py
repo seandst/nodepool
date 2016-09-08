@@ -18,6 +18,7 @@
 
 import logging
 import re
+from xml.etree.ElementTree import fromstring
 
 import myjenkins
 import fakeprovider
@@ -135,3 +136,19 @@ class JenkinsManager(TaskManager):
 
     def getInfo(self):
         return self._client.get_info()
+
+    def getQueueInfo(self):
+        return self._client.get_queue_info()
+
+    def getQueuedTaskLabel(self, task_name):
+        # XXX All the different ways to determine a label based on jobs in the queue aren't known.
+        #     Assumptions are being made here that might not be able to determine a label
+        #     correctly, so this should fail safe and log misses so we can fix those up.
+        try:
+            task_config = fromstring(self._client.get_job_config(task_name))
+            task_label = task_config.find('assignedNode').text
+        except myjenkins.jenkins.NotFoundException:
+            # task with task name not found, so assuming it's a "node-type=<label>" expression
+            task_label = task_name.split('=', 1)[1]
+
+        return task_label
