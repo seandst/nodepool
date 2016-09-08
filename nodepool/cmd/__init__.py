@@ -31,6 +31,7 @@ class NodepoolApp(object):
                 raise Exception("Unable to read logging config file at %s" %
                                 fp)
             logging.config.fileConfig(fp)
+            logging.info('Logging configured from file %s' % fp)
         else:
             logging.basicConfig(level=logging.DEBUG,
                                 format='%(asctime)s %(levelname)s %(name)s: '
