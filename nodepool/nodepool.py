@@ -2202,9 +2202,9 @@ class NodePool(threading.Thread):
             if (node.label_name != label.name or
                     node.state != nodedb.READY):
                 self.log.error('cleanupReadyNodes handed an insane node!')
-            return
+                return
 
-        if len(nodes) <= label.min_ready:
+        if len(nodes) <= int(label.min_ready):
             # no extra nodes
             return
 
@@ -2217,7 +2217,7 @@ class NodePool(threading.Thread):
             if time_in_state > NODE_EXTRA:
                 try:
                     self.deleteNode(node.id)
-                    self.log.info('Deleted extra node %s with label "%s"' % (node.id, label.name))
+                    self.log.info('Deleting extra node %s for label "%s"' % (node.id, label.name))
                     return
                 except Exception:
                     self.log.exception("Exception deleting node id: "
