@@ -49,6 +49,14 @@ def shade_inner_exceptions():
         raise
 
 
+@contextmanager
+def shade_warn_exceptions(logger):
+    try:
+        yield
+    except shade.OpenStackCloudException as e:
+        logger.warning(str(e))
+
+
 class NotFound(Exception):
     pass
 
@@ -222,7 +230,7 @@ class ProviderManager(TaskManager):
             nodepool=json.dumps(nodepool_meta)
         )
 
-        with shade_inner_exceptions():
+        with shade_warn_exceptions(self.log):
             return self._client.create_server(wait=False, **create_args)
 
     def getServer(self, server_id):
@@ -326,8 +334,12 @@ class ProviderManager(TaskManager):
             return self._client.list_servers()
 
     def deleteServer(self, server_id):
-        with shade_inner_exceptions():
+        with shade_warn_exceptions(self.log):
             return self._client.delete_server(server_id, delete_ips=True)
+        # If delete fails because of delete_ips, try again without,
+        # and let cleanupLeakedFloaters clean up the floating IP
+        with shade_warn_exceptions(self.log):
+            return self._client.delete_server(server_id)
 
     def cleanupServer(self, server_id):
         server = self.getServer(server_id)
@@ -343,7 +355,7 @@ class ProviderManager(TaskManager):
         self.deleteServer(server_id)
 
     def cleanupLeakedFloaters(self):
-        with shade_inner_exceptions():
+        with shade_warn_exceptions(self.log):
             self._client.delete_unattached_floating_ips()
 
 
