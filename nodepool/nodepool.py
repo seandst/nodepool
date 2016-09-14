@@ -22,6 +22,7 @@ from collections import defaultdict
 import gear
 import json
 import logging
+from operator import itemgetter
 import os.path
 import paramiko
 import pprint
@@ -1483,6 +1484,49 @@ class NodePool(threading.Thread):
 
         allocation_history.grantsDone()
 
+        # sort allocations by label demand by demanded amount
+        # does a weighted round-robin using the node demand as priority
+        # convert these lists so the values are mutable inside
+        node_tracker = map(list, nodes_to_launch)
+
+        # empty out nodes_to_launch since we're going to refill it with new ordering
+        nodes_to_launch = []
+
+        while node_tracker:
+            # sort the tracker based on the number that we need to spawn, descending
+            node_tracker = sorted(node_tracker, key=itemgetter(1), reverse=True)
+
+            # pull off the two highest demanded pairs
+            try:
+                first, second = node_tracker[:2]
+            except ValueError:
+                # couldn't unpack because there's no second element, which means this is the last
+                # item to add and we're done. the "first" identifier didn't get rebound, so we have
+                # to directly index the first element of node_tracker here
+                nodes_to_launch.append(node_tracker[0])
+                break
+
+            # get the number of nodes to spawn for this loop cycle. if the first two values are
+            # equal, spawn one node. This round-robins labels of equal demand as a result.
+            node_diff = max(first[1] - second[1], 1)
+
+            # subtract the number of nodes spawned from the tracker value so that the demand
+            # sorts properly the next time through the loop
+            first[1] -= node_diff
+
+            # the super important part: add the allocation back to the node launch list
+            nodes_to_launch.append((first[0], node_diff))
+
+            # clean out values of 0 (or less) from the node tracker so that it eventually
+            # empties out and triggers the break condition above
+            node_tracker = [item for item in node_tracker if item[1] > 0]
+
+        if nodes_to_launch:
+            self.log.info('Round-robin node launch order:')
+            for tlp, amount in nodes_to_launch:
+                self.log.info('  %s: %d on provider %s for %s' %
+                    (tlp[1].name, amount, tlp[2].name, tlp[0].name))
+
         self.log.debug("Finished checking label demand.")
         return nodes_to_launch
 
@@ -1510,6 +1554,9 @@ class NodePool(threading.Thread):
 
                 if task_label in self.config.labels:
                     label_demand[task_label] += 1
+                elif task_label == 'master':
+                    # Ignore the default 'master' label
+                    pass
                 else:
                     self.log.warning('Unknown label "%s" ignored' % task_label)
         return label_demand
