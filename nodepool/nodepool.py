@@ -19,7 +19,9 @@
 import apscheduler.schedulers.background
 import apscheduler.triggers.cron
 from collections import defaultdict
+from datetime import datetime
 import gear
+import iso8601
 import json
 import logging
 from operator import itemgetter
@@ -2198,8 +2200,36 @@ class NodePool(threading.Thread):
                     snap_image_id = meta.get('snapshot_image_id')
                     node_id = meta.get('node_id')
                     if snap_image_id:
-                        if session.getSnapshotImage(snap_image_id):
+                        # snap_image_id identifies this as a snapshot builder instance
+                        snapshot = session.getSnapshotImage(snap_image_id)
+                        if snapshot and snapshot.state == nodedb.READY:
+                            # XXX This is a safety net. The snapshot image build process
+                            #     should be reliably cleaning up the instances it uses to
+                            #     build instances. If it fails, this kicks in. This should
+                            #     only affect nodes that have successfully had an image made,
+                            #     ensuring that the node is certainly no longer needed.
+                            try:
+                                node_created = iso8601.parse_date(server.get('created'))
+                                node_life = datetime.now(iso8601.UTC) - node_created
+                            except iso8601.ParseError:
+                                # server has unparseable created date, can't process
+                                continue
+                            # reuse the image cleanup time to also define the max
+                            # allowed lifetime of image builder nodes that haven't
+                            # been properly terminated
+                            if node_life.total_seconds() > IMAGE_CLEANUP:
+                                # using cleanupServer here since it also
+                                # cleans up keypairs related to the instance
+                                # that aren't the main provider keypair
+                                self.log.info('Cleaning up old image builder node %s' %
+                                              server['name'])
+                                manager.cleanupServer(server['id'])
                             continue
+                        elif snapshot:
+                            # if the image is not ready, leave it alone,
+                            # assumes that it's still building
+                            continue
+
                         self.log.warning("Deleting leaked instance %s (%s) "
                                          "in %s for snapshot image id: %s" % (
                                              server['name'], server['id'],
