@@ -543,10 +543,13 @@ class NodeLauncher(threading.Thread):
         self.log.debug("Node id: %s testing ssh at ip: %s" %
                        (self.node.id, ip))
         connect_kwargs = dict(key_filename=self.image.private_key)
-        if not utils.ssh_connect(ip, self.image.username,
-                                 connect_kwargs=connect_kwargs,
-                                 timeout=self.timeout):
+        host = utils.ssh_connect(ip, self.image.username,
+                                connect_kwargs=connect_kwargs,
+                                timeout=self.timeout)
+        if not host:
             raise LaunchAuthException("Unable to connect via ssh")
+
+        host.client.close()
 
         # Save the elapsed time for statsd
         dt = int((time.time() - start_time) * 1000)
@@ -700,6 +703,7 @@ class NodeLauncher(threading.Thread):
             f.close()
 
             ftp.close()
+            host.client.close()
 
     def runReadyScript(self, nodelist):
         for role, n in nodelist:
@@ -718,6 +722,7 @@ class NodeLauncher(threading.Thread):
                      "cd /opt/nodepool-scripts && %s ./%s %s" %
                      (env_vars, self.label.ready_script, n.hostname),
                      output=True)
+            host.client.close()
 
 
 class SubNodeLauncher(threading.Thread):
@@ -864,10 +869,13 @@ class SubNodeLauncher(threading.Thread):
         self.log.debug("Subnode id: %s for node id: %s testing ssh at ip: %s" %
                        (self.subnode_id, self.node_id, ip))
         connect_kwargs = dict(key_filename=self.image.private_key)
-        if not utils.ssh_connect(ip, self.image.username,
-                                 connect_kwargs=connect_kwargs,
-                                 timeout=self.timeout):
+        host = utils.ssh_connect(ip, self.image.username,
+                                  connect_kwargs=connect_kwargs,
+                                  timeout=self.timeout)
+        if not host:
             raise LaunchAuthException("Unable to connect via ssh")
+
+        host.client.close()
 
         # Save the elapsed time for statsd
         dt = int((time.time() - start_time) * 1000)
@@ -1127,6 +1135,8 @@ class SnapshotImageUpdater(ImageUpdater):
                      "%s; cd /opt/nodepool-scripts "
                      "&& %s ./%s %s && sync && sleep 5" %
                      (set_path, env_vars, self.image.setup, server['name']))
+
+        host.client.close()
 
 
 class NodePool(threading.Thread):
@@ -2395,8 +2405,10 @@ class NodePool(threading.Thread):
                 image = provider.images[label.image]
                 connect_kwargs = dict(key_filename=image.private_key)
                 try:
-                    if utils.ssh_connect(node.ip, image.username,
-                                         connect_kwargs=connect_kwargs):
+                    host = utils.ssh_connect(node.ip, image.username,
+                                             connect_kwargs=connect_kwargs)
+                    if host:
+                        host.client.close()
                         continue
                 except Exception:
                     self.log.exception("SSH Check failed for node id: %s" %
